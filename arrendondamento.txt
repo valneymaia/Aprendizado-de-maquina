@@ -1,0 +1,128 @@
+
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.preprocessing import StandardScaler, PolynomialFeatures
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+# Atualize o caminho do arquivo para o novo arquivo na área de trabalho
+file_path = 'C:\\Users\\W10\\Desktop\\dados.xlsx'
+df = pd.read_excel(file_path)
+
+# Exclui colunas não necessárias e define variáveis dependentes
+dados = df.values
+x = np.delete(dados, [0, 3, 4], axis=1)  # Remove as colunas "Rodada", "GS2T" e "GF2T"
+y = dados[:, [3, 4]]  # GS2T e GF2T como variáveis dependentes
+
+# Engenharia de atributos - Normalização (pode melhorar a performance)
+scaler = StandardScaler()
+x_scaled = scaler.fit_transform(x)
+
+# Divisão do conjunto de dados em treino e teste
+x_train, x_test, y_train, y_test = train_test_split(x_scaled, y, test_size=0.2, random_state=42)
+
+# Adiciona interações polinomiais
+poly = PolynomialFeatures(degree=2)
+x_train_poly = poly.fit_transform(x_train)
+x_test_poly = poly.transform(x_test)
+
+# Modelo de Regressão Linear com polinômios
+model = LinearRegression()
+model.fit(x_train_poly, y_train)
+y_pred = model.predict(x_test_poly)
+
+# Função para arredondamento das previsões conforme as regras especificadas
+def arredondar_previsao(previsao):
+    if previsao >= 1.5:
+        return 2
+    elif previsao >= 0.5:
+        return 1
+    else:
+        return 0
+
+# Arredondamento das previsões
+y_pred_arredondado = np.array([[arredondar_previsao(p[0]), arredondar_previsao(p[1])] for p in y_pred])
+
+# Exibir previsões e valores reais, com mensagem "green" quando coincidirem
+print("\nPrevisões e Valores Reais (GF2T e GS2T):")
+for i in range(len(y_pred_arredondado)):
+    gs2t_pred = y_pred_arredondado[i][0]
+    gf2t_pred = y_pred_arredondado[i][1]
+    gs2t_real = y_test[i][0]
+    gf2t_real = y_test[i][1]
+    
+    # Exibir previsão e valor real
+    print(f"Previsão - GF2T: {gf2t_pred}, GS2T: {gs2t_pred} | Valor Real - GF2T: {gf2t_real}, GS2T: {gs2t_real}")
+    
+    # Verifica se a previsão coincide com o valor real
+    if gs2t_pred == gs2t_real and gf2t_pred == gf2t_real:
+        print("green")
+
+# Métricas de desempenho
+mse = mean_squared_error(y_test, y_pred)
+r2 = r2_score(y_test, y_pred)
+y_test_flat = y_test.flatten()
+y_pred_flat = y_pred.flatten()
+pearson_corr = np.corrcoef(y_test_flat, y_pred_flat)[0, 1]
+
+print(f'\nMean Squared Error: {mse}')
+print(f'R^2 Score: {r2}')
+print(f'Pearson Correlation Coefficient: {pearson_corr}')
+
+# Gráfico de correlação
+corr_matrix = df.corr()
+plt.figure(figsize=(12, 8))
+sns.heatmap(corr_matrix, annot=True, cmap='coolwarm')
+plt.show()
+
+# Avaliação de resíduos
+residuals = y_test - y_pred
+plt.scatter(y_test[:, 0], residuals[:, 0], color='blue', label='GS2T Residuals')
+plt.scatter(y_test[:, 1], residuals[:, 1], color='red', label='GF2T Residuals')
+plt.hlines(0, min(y_test.flatten()), max(y_test.flatten()), colors='green')
+plt.title('Resíduos')
+plt.xlabel('Valor Real')
+plt.ylabel('Resíduo')
+plt.legend()
+plt.show()
+
+
+
+# Gráfico de dispersão dos dados reais vs previsões
+plt.scatter(y_test[:, 0], y_test[:, 1], color='blue', label='Dados Reais')
+plt.scatter(y_pred[:, 0], y_pred[:, 1], color='red', label='Previsões')
+plt.title('Previsões vs Dados Reais')
+plt.xlabel('GS2T (Gols Sofridos)')
+plt.ylabel('GF2T (Gols Marcados)')
+plt.legend()
+plt.show()
+Previsões e Valores Reais (GF2T e GS2T):
+Previsão - GF2T: 1, GS2T: 0 | Valor Real - GF2T: 0, GS2T: 0
+Previsão - GF2T: 0, GS2T: 2 | Valor Real - GF2T: 0, GS2T: 0
+Previsão - GF2T: 0, GS2T: 2 | Valor Real - GF2T: 1, GS2T: 1
+Previsão - GF2T: 2, GS2T: 0 | Valor Real - GF2T: 2, GS2T: 2
+Previsão - GF2T: 1, GS2T: 2 | Valor Real - GF2T: 0, GS2T: 3
+Previsão - GF2T: 1, GS2T: 0 | Valor Real - GF2T: 0, GS2T: 0
+Previsão - GF2T: 1, GS2T: 0 | Valor Real - GF2T: 1, GS2T: 0
+green
+Previsão - GF2T: 2, GS2T: 0 | Valor Real - GF2T: 1, GS2T: 0
+Previsão - GF2T: 1, GS2T: 0 | Valor Real - GF2T: 1, GS2T: 1
+Previsão - GF2T: 2, GS2T: 1 | Valor Real - GF2T: 3, GS2T: 0
+Previsão - GF2T: 1, GS2T: 1 | Valor Real - GF2T: 1, GS2T: 0
+Previsão - GF2T: 1, GS2T: 1 | Valor Real - GF2T: 0, GS2T: 0
+Previsão - GF2T: 1, GS2T: 0 | Valor Real - GF2T: 1, GS2T: 0
+green
+Previsão - GF2T: 2, GS2T: 1 | Valor Real - GF2T: 1, GS2T: 0
+Previsão - GF2T: 2, GS2T: 0 | Valor Real - GF2T: 1, GS2T: 1
+Previsão - GF2T: 0, GS2T: 1 | Valor Real - GF2T: 1, GS2T: 0
+Previsão - GF2T: 1, GS2T: 2 | Valor Real - GF2T: 0, GS2T: 1
+Previsão - GF2T: 0, GS2T: 1 | Valor Real - GF2T: 1, GS2T: 0
+Previsão - GF2T: 1, GS2T: 1 | Valor Real - GF2T: 1, GS2T: 0
+Previsão - GF2T: 1, GS2T: 0 | Valor Real - GF2T: 0, GS2T: 1
+
+Mean Squared Error: 1.0217715070698428
+R^2 Score: -0.6924776258145566
+Pearson Correlation Coefficient: 0.4476626666913227

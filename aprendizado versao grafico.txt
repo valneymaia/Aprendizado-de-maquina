@@ -1,0 +1,235 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_squared_error, r2_score
+import matplotlib.pyplot as plt
+
+# Atualize o caminho do arquivo para o novo arquivo na área de trabalho
+file_path = 'C:\\Users\\W10\\Desktop\\dados.xlsx'
+df = pd.read_excel(file_path)
+
+dados = df.values
+x = np.delete(dados, [0, 3, 4], axis=1)
+y = dados[:, [3, 4]]
+
+x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.2, random_state=42)
+
+model = LinearRegression()
+model.fit(x_train, y_train)
+
+y_pred = model.predict(x_test)
+
+for var in range(len(y_pred)):
+    print(f'Previsão: {y_pred[var]}, Entrada: {x_test[var]}')
+
+mse = mean_squared_error(y_test, y_pred)
+r2 = r2_score(y_test, y_pred)
+
+print(f'Mean Squared Error: {mse}')
+print(f'R^2 Score: {r2}')
+
+y_test_flat = y_test.flatten()
+y_pred_flat = y_pred.flatten()
+pearson_corr = np.corrcoef(y_test_flat, y_pred_flat)[0, 1]
+
+print(f'Pearson Correlation Coefficient: {pearson_corr}')
+
+# Gráfico de dispersão dos dados reais
+plt.scatter(y_test[:, 0], y_test[:, 1], color='blue', label='Dados Reais')
+
+# Gráfico das previsões
+plt.scatter(y_pred[:, 0], y_pred[:, 1], color='red', label='Previsões')
+
+# Adiciona título e rótulos aos eixos
+plt.title('Regressão Linear')
+plt.xlabel('Variável Dependente 1')
+plt.ylabel('Variável Dependente 2')
+
+# Adiciona uma legenda
+plt.legend()
+
+# Exibe o gráfico
+plt.show()
+--------------------------------------------------------------
+
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.linear_model import LinearRegression, Ridge, Lasso
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.preprocessing import StandardScaler, PolynomialFeatures
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+# Atualize o caminho do arquivo para o novo arquivo na área de trabalho
+file_path = 'C:\\Users\\W10\\Desktop\\dados.xlsx'
+df = pd.read_excel(file_path)
+
+# Exclui colunas não necessárias e define variáveis dependentes
+dados = df.values
+x = np.delete(dados, [0, 3, 4], axis=1)  # Remove as colunas "Rodada", "GS2T" e "GF2T"
+y = dados[:, [3, 4]]  # GS2T e GF2T como variáveis dependentes
+
+# Engenharia de atributos - Normalização (pode melhorar a performance)
+scaler = StandardScaler()
+x_scaled = scaler.fit_transform(x)
+
+# Divisão do conjunto de dados em treino e teste
+x_train, x_test, y_train, y_test = train_test_split(x_scaled, y, test_size=0.2, random_state=42)
+
+# Adiciona interações polinomiais
+poly = PolynomialFeatures(degree=2)
+x_train_poly = poly.fit_transform(x_train)
+x_test_poly = poly.transform(x_test)
+
+# Modelo de Regressão Linear com polinômios
+model = LinearRegression()
+model.fit(x_train_poly, y_train)
+y_pred = model.predict(x_test_poly)
+
+# Métricas de desempenho
+mse = mean_squared_error(y_test, y_pred)
+r2 = r2_score(y_test, y_pred)
+y_test_flat = y_test.flatten()
+y_pred_flat = y_pred.flatten()
+pearson_corr = np.corrcoef(y_test_flat, y_pred_flat)[0, 1]
+
+print(f'Mean Squared Error: {mse}')
+print(f'R^2 Score: {r2}')
+print(f'Pearson Correlation Coefficient: {pearson_corr}')
+
+# Validação cruzada
+scores = cross_val_score(model, x_train_poly, y_train, cv=5, scoring='neg_mean_squared_error')
+print(f'Mean Cross-Validation MSE: {-np.mean(scores)}')
+
+# Gráfico de correlação
+corr_matrix = df.corr()
+plt.figure(figsize=(12, 8))
+sns.heatmap(corr_matrix, annot=True, cmap='coolwarm')
+plt.show()
+
+# Avaliação de resíduos
+residuals = y_test - y_pred
+plt.scatter(y_test[:, 0], residuals[:, 0], color='blue', label='GS2T Residuals')
+plt.scatter(y_test[:, 1], residuals[:, 1], color='red', label='GF2T Residuals')
+plt.hlines(0, min(y_test.flatten()), max(y_test.flatten()), colors='green')
+plt.title('Resíduos')
+plt.xlabel('Valor Real')
+plt.ylabel('Resíduo')
+plt.legend()
+plt.show()
+
+# Gráfico de dispersão dos dados reais vs previsões
+plt.scatter(y_test[:, 0], y_test[:, 1], color='blue', label='Dados Reais')
+plt.scatter(y_pred[:, 0], y_pred[:, 1], color='red', label='Previsões')
+plt.title('Previsões vs Dados Reais')
+plt.xlabel('GS2T (Gols Sofridos)')
+plt.ylabel('GF2T (Gols Marcados)')
+plt.legend()
+plt.show()
+
+# Teste de modelos regularizados para comparação (Ridge e Lasso)
+ridge = Ridge(alpha=1.0)
+ridge.fit(x_train_poly, y_train)
+ridge_pred = ridge.predict(x_test_poly)
+ridge_mse = mean_squared_error(y_test, ridge_pred)
+print(f'Ridge MSE: {ridge_mse}')
+
+lasso = Lasso(alpha=0.1)
+lasso.fit(x_train_poly, y_train)
+lasso_pred = lasso.predict(x_test_poly)
+lasso_mse = mean_squared_error(y_test, lasso_pred)
+print(f'Lasso MSE: {lasso_mse}')
+------------------------------------------------------------
+
+
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.linear_model import LinearRegression, Ridge, Lasso
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.preprocessing import StandardScaler, PolynomialFeatures
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+# Atualize o caminho do arquivo para o novo arquivo na área de trabalho
+file_path = 'C:\\Users\\W10\\Desktop\\dados.xlsx'
+df = pd.read_excel(file_path)
+
+# Exclui colunas não necessárias e define variáveis dependentes
+dados = df.values
+x = np.delete(dados, [0, 3, 4], axis=1)  # Remove as colunas "Rodada", "GS2T" e "GF2T"
+y = dados[:, [3, 4]]  # GS2T e GF2T como variáveis dependentes
+
+# Engenharia de atributos - Normalização (pode melhorar a performance)
+scaler = StandardScaler()
+x_scaled = scaler.fit_transform(x)
+
+# Divisão do conjunto de dados em treino e teste
+x_train, x_test, y_train, y_test = train_test_split(x_scaled, y, test_size=0.2, random_state=42)
+
+# Adiciona interações polinomiais
+poly = PolynomialFeatures(degree=2)
+x_train_poly = poly.fit_transform(x_train)
+x_test_poly = poly.transform(x_test)
+
+# Modelo de Regressão Linear com polinômios
+model = LinearRegression()
+model.fit(x_train_poly, y_train)
+y_pred = model.predict(x_test_poly)
+
+# Métricas de desempenho
+mse = mean_squared_error(y_test, y_pred)
+r2 = r2_score(y_test, y_pred)
+y_test_flat = y_test.flatten()
+y_pred_flat = y_pred.flatten()
+pearson_corr = np.corrcoef(y_test_flat, y_pred_flat)[0, 1]
+
+print(f'Mean Squared Error: {mse}')
+print(f'R^2 Score: {r2}')
+print(f'Pearson Correlation Coefficient: {pearson_corr}')
+
+# Previsões vs valores reais
+print("\nPrevisões e Valores Reais (GF2T e GS2T):")
+for i in range(len(y_pred)):
+    print(f"Previsão - GF2T: {y_pred[i][1]:.2f}, GS2T: {y_pred[i][0]:.2f} | Valor Real - GF2T: {y_test[i][1]}, GS2T: {y_test[i][0]}")
+
+# Gráfico de correlação
+corr_matrix = df.corr()
+plt.figure(figsize=(12, 8))
+sns.heatmap(corr_matrix, annot=True, cmap='coolwarm')
+plt.show()
+
+# Avaliação de resíduos
+residuals = y_test - y_pred
+plt.scatter(y_test[:, 0], residuals[:, 0], color='blue', label='GS2T Residuals')
+plt.scatter(y_test[:, 1], residuals[:, 1], color='red', label='GF2T Residuals')
+plt.hlines(0, min(y_test.flatten()), max(y_test.flatten()), colors='green')
+plt.title('Resíduos')
+plt.xlabel('Valor Real')
+plt.ylabel('Resíduo')
+plt.legend()
+plt.show()
+
+# Gráfico de dispersão dos dados reais vs previsões
+plt.scatter(y_test[:, 0], y_test[:, 1], color='blue', label='Dados Reais')
+plt.scatter(y_pred[:, 0], y_pred[:, 1], color='red', label='Previsões')
+plt.title('Previsões vs Dados Reais')
+plt.xlabel('GS2T (Gols Sofridos)')
+plt.ylabel('GF2T (Gols Marcados)')
+plt.legend()
+plt.show()
+
+# Teste de modelos regularizados para comparação (Ridge e Lasso)
+ridge = Ridge(alpha=1.0)
+ridge.fit(x_train_poly, y_train)
+ridge_pred = ridge.predict(x_test_poly)
+ridge_mse = mean_squared_error(y_test, ridge_pred)
+print(f'Ridge MSE: {ridge_mse}')
+
+lasso = Lasso(alpha=0.1)
+lasso.fit(x_train_poly, y_train)
+lasso_pred = lasso.predict(x_test_poly)
+lasso_mse = mean_squared_error(y_test, lasso_pred)
+print(f'Lasso MSE: {lasso_mse}')
