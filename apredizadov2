@@ -1,0 +1,584 @@
+from sklearn.model_selection import KFold, train_test_split, GridSearchCV
+import numpy as np
+import pandas as pd
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error, r2_score
+import statsmodels.api as sm
+from statsmodels.formula.api import ols
+from statsmodels.stats.anova import AnovaRM
+from statsmodels.stats.multicomp import pairwise_tukeyhsd
+# Import opcional do XGBoost
+try:
+    from xgboost import XGBRegressor
+    xgb_available = True
+except Exception:
+    XGBRegressor = None
+    xgb_available = False
+
+def main(fold_num, predict_first_n=10):
+
+
+    file_path = r'C:\Users\W10\Documents\UFCA\APrendizadod maquina\dados.xlsx'
+    df = pd.read_excel(file_path)
+
+    # Obtendo os dados e a coluna RODADA
+    rodadas = df['Rodada'].values  # A coluna "RODADA" para identificar os jogos
+    dados = df.values
+
+    x = np.delete(dados, [0, 3, 4], axis=1)
+    y = dados[:, [3, 4]]
+    # Separar as primeiras N linhas (cronológicas) que queremos prever
+    n_first = int(predict_first_n) if predict_first_n is not None else 0
+    if n_first > 0 and n_first < len(x):
+        x_first = x[:n_first].copy()
+        y_first = y[:n_first].copy()
+        rodadas_first = rodadas[:n_first].copy()
+        x_rest = x[n_first:]
+        y_rest = y[n_first:]
+        rodadas_rest = rodadas[n_first:]
+    else:
+        # sem first-set
+        x_first = np.empty((0, x.shape[1]))
+        y_first = np.empty((0, y.shape[1]))
+        rodadas_first = np.empty((0,))
+        x_rest = x
+        y_rest = y
+        rodadas_rest = rodadas
+
+    # Aleatorizando o restante dos dados (mantemos as primeiras n intactas para teste)
+    np.random.seed(6)
+    indices = np.random.permutation(len(x_rest))
+    x_rest = x_rest[indices]
+    y_rest = y_rest[indices]
+    rodadas_rest = rodadas_rest[indices]
+
+    # Separação treino / teste final a partir do restante (20% do restante como teste final)
+    x_train_all, x_test, y_train_all, y_test, rodadas_train_all, rodadas_test = train_test_split(
+        x_rest, y_rest, rodadas_rest, test_size=0.20, random_state=6)
+
+    # Outer CV para avaliação (usado junto com Grid Search interno -> nested CV)
+    outer_cv = KFold(n_splits=5, shuffle=True, random_state=6)
+    inner_cv = KFold(n_splits=3, shuffle=True, random_state=6)
+
+
+    # Inicializando listas para armazenar resultados (apenas RF e LR)
+    mse_list_rf = [[], []]
+    r2_list_rf = [[], []]
+    acertos_list_rf = []
+
+    mse_list_lr = [[], []]
+    r2_list_lr = [[], []]
+    acertos_list_lr = []
+    # listas para XGBoost (reintroduzido)
+    mse_list_xgb = [[], []]
+    r2_list_xgb = [[], []]
+    acertos_list_xgb = []
+    # listas para verificar se a soma dos gols previstos >= 2 coincide com a soma real >=2
+    over2_list_rf = []
+    over2_list_lr = []
+    over2_list_xgb = []
+
+    # Inicializando lista para armazenar resultados de teste
+    saida_teste = []
+
+    # Função para calcular acertos
+    def calcular_acertos(y_pred, y_val, rodadas_val, modelo):
+        acertos = 0
+        acertos_placar_exato = 0
+        for var in range(len(y_pred)):
+            previsao = 'Empate' if np.rint(y_pred[var][0]) == np.rint(y_pred[var][1]) else ('Vitória do adversário' if np.rint(y_pred[var][0]) > np.rint(y_pred[var][1]) else 'Vitória do flamengo')
+            resultado = 'Empate' if np.rint(y_val[var][0]) == np.rint(y_val[var][1]) else ('Vitória do adversário' if np.rint(y_val[var][0]) > np.rint(y_val[var][1]) else 'Vitória do flamengo') 
+
+            if previsao == resultado:
+                acertos += 1
+            
+            if np.rint(y_pred[var][0]) == np.rint(y_val[var][0]) and np.rint(y_pred[var][1]) == np.rint(y_val[var][1]):
+                acertos_placar_exato += 1
+
+            print(f'{modelo} Rodada: {rodadas_val[var]}, Previsão: {y_pred[var]}|{np.rint(y_pred[var])}, Resultado real: {y_val[var]}, Previsão: {previsao}, Resultado real: {resultado}')
+            if modelo.startswith("Teste"):
+                saida_teste.append({
+                    'modelo': modelo,
+                    'rodada': rodadas_val[var],
+                    'gols_feitos_previstos': y_pred[var][1],
+                    'gols_sofridos_previstos': y_pred[var][0],
+                    'gols_feitos_reais': y_val[var][1],
+                    'gols_sofridos_reais': y_val[var][0]
+                })
+        return acertos, acertos_placar_exato
+
+    # Definindo os parâmetros para a busca em grid
+    param_grid_rf = {
+        'n_estimators': [100, 200, 300],
+        'max_depth': [None, 10, 20],
+        'min_samples_split': [2, 10],
+        'min_samples_leaf': [1, 2]
+    }
+
+    param_grid_xgb = {
+        'n_estimators': [100, 200],
+        'max_depth': [3, 6, 10],
+        'learning_rate': [0.01, 0.1],
+        'subsample': [0.7, 1.0]
+    }
+
+    param_grid_lr = {
+        'fit_intercept': [True, False]
+    }
+
+    # removed other model grids; keep RF and LR grids only
+
+    # Função para realizar a busca em grid (usa inner_cv do escopo)
+    def grid_search(model, param_grid, x_train, y_train):
+        gs = GridSearchCV(model, param_grid, cv=inner_cv, scoring='r2', n_jobs=-1)
+        gs.fit(x_train, y_train)
+        return gs.best_estimator_, gs.best_params_
+
+    # Vamos usar nested CV: GridSearch (inner_cv) dentro do loop do outer_cv.
+    # Avaliaremos métricas por fold do outer_cv usando apenas dados de treino (x_train_all).
+
+
+    fold = 0
+    # Nested CV: para cada fold externo, fazemos GridSearch no conjunto de treino do fold (inner_cv)
+    for train_index, val_index in outer_cv.split(x_train_all):
+        fold += 1
+        print("outer fold:", fold)
+        X_tr = x_train_all[train_index]
+        y_tr = y_train_all[train_index]
+        X_val = x_train_all[val_index]
+        y_val = y_train_all[val_index]
+        rodadas_val = rodadas_train_all[val_index]
+
+        # Ajustar um modelo por target com GridSearch no X_tr/y_tr
+        # Random Forest
+        best_rf_0, _ = grid_search(RandomForestRegressor(random_state=100), param_grid_rf, X_tr, y_tr[:, 0])
+        best_rf_1, _ = grid_search(RandomForestRegressor(random_state=100), param_grid_rf, X_tr, y_tr[:, 1])
+        # Regressão Linear
+        best_lr_0, _ = grid_search(LinearRegression(), param_grid_lr, X_tr, y_tr[:, 0])
+        best_lr_1, _ = grid_search(LinearRegression(), param_grid_lr, X_tr, y_tr[:, 1])
+        # XGBoost (opcional)
+        if xgb_available:
+            best_xgb_0, _ = grid_search(XGBRegressor(objective='reg:squarederror', random_state=100), param_grid_xgb, X_tr, y_tr[:, 0])
+            best_xgb_1, _ = grid_search(XGBRegressor(objective='reg:squarederror', random_state=100), param_grid_xgb, X_tr, y_tr[:, 1])
+
+        # Fazer previsões no fold de validação externo
+        y_pred_rf_0 = best_rf_0.predict(X_val)
+        y_pred_rf_1 = best_rf_1.predict(X_val)
+        y_pred_rf = np.column_stack((y_pred_rf_0, y_pred_rf_1))
+
+        y_pred_lr_0 = best_lr_0.predict(X_val)
+        y_pred_lr_1 = best_lr_1.predict(X_val)
+        y_pred_lr = np.column_stack((y_pred_lr_0, y_pred_lr_1))
+
+        # Garantir valores válidos para gols (não-negativos)
+        y_pred_rf = np.clip(y_pred_rf, 0, None)
+        y_pred_lr = np.clip(y_pred_lr, 0, None)
+        if xgb_available:
+            y_pred_xgb_0 = best_xgb_0.predict(X_val)
+            y_pred_xgb_1 = best_xgb_1.predict(X_val)
+            y_pred_xgb = np.column_stack((y_pred_xgb_0, y_pred_xgb_1))
+            y_pred_xgb = np.clip(y_pred_xgb, 0, None)
+
+        # Avaliação dos modelos
+        acertos_rf, acertos_placar_exato_rf = calcular_acertos(y_pred_rf, y_val, rodadas_val, "Random Forest")
+        mse_rf_0 = mean_squared_error(y_val[:, 0], y_pred_rf[:, 0])
+        mse_rf_1 = mean_squared_error(y_val[:, 1], y_pred_rf[:, 1])
+        r2_rf_0 = r2_score(y_val[:, 0], y_pred_rf[:, 0])
+        r2_rf_1 = r2_score(y_val[:, 1], y_pred_rf[:, 1])
+
+        mse_list_rf[0].append(mse_rf_0)
+        mse_list_rf[1].append(mse_rf_1)
+        r2_list_rf[0].append(r2_rf_0)
+        r2_list_rf[1].append(r2_rf_1)
+        acertos_list_rf.append((acertos_rf, acertos_placar_exato_rf))
+
+        acertos_lr, acertos_placar_exato_lr = calcular_acertos(y_pred_lr, y_val, rodadas_val, "Regressão Linear")
+        mse_lr_0 = mean_squared_error(y_val[:, 0], y_pred_lr[:, 0])
+        mse_lr_1 = mean_squared_error(y_val[:, 1], y_pred_lr[:, 1])
+        r2_lr_0 = r2_score(y_val[:, 0], y_pred_lr[:, 0])
+        r2_lr_1 = r2_score(y_val[:, 1], y_pred_lr[:, 1])
+
+        mse_list_lr[0].append(mse_lr_0)
+        mse_list_lr[1].append(mse_lr_1)
+        r2_list_lr[0].append(r2_lr_0)
+        r2_list_lr[1].append(r2_lr_1)
+        acertos_list_lr.append((acertos_lr, acertos_placar_exato_lr))
+
+        # Avaliação XGBoost (se disponível)
+        if xgb_available:
+            acertos_xgb, acertos_placar_exato_xgb = calcular_acertos(y_pred_xgb, y_val, rodadas_val, "XGBoost")
+            mse_xgb_0 = mean_squared_error(y_val[:, 0], y_pred_xgb[:, 0])
+            mse_xgb_1 = mean_squared_error(y_val[:, 1], y_pred_xgb[:, 1])
+            r2_xgb_0 = r2_score(y_val[:, 0], y_pred_xgb[:, 0])
+            r2_xgb_1 = r2_score(y_val[:, 1], y_pred_xgb[:, 1])
+
+            mse_list_xgb[0].append(mse_xgb_0)
+            mse_list_xgb[1].append(mse_xgb_1)
+            r2_list_xgb[0].append(r2_xgb_0)
+            r2_list_xgb[1].append(r2_xgb_1)
+            acertos_list_xgb.append((acertos_xgb, acertos_placar_exato_xgb))
+
+            # over2 para xgb
+            y_pred_xgb_arr = np.asarray(y_pred_xgb, dtype=float)
+            pred_sum_xgb = np.rint(y_pred_xgb_arr[:, 0]) + np.rint(y_pred_xgb_arr[:, 1])
+            # calcular real_sum local a partir de y_val (ainda dentro do fold)
+            y_val_arr_local = np.asarray(y_val, dtype=float)
+            real_sum_local = np.rint(y_val_arr_local[:, 0]) + np.rint(y_val_arr_local[:, 1])
+            over2_correct_xgb = np.sum((pred_sum_xgb >= 2) == (real_sum_local >= 2))
+            over2_list_xgb.append(over2_correct_xgb / len(y_val_arr_local))
+
+    # Verificação extra: total de gols no 2º tempo >= 2 (comparar predição x real)
+    # Garantir arrays numpy float
+    y_val_arr = np.asarray(y_val, dtype=float)
+    y_pred_rf_arr = np.asarray(y_pred_rf, dtype=float)
+    y_pred_lr_arr = np.asarray(y_pred_lr, dtype=float)
+
+    pred_sum_rf = np.rint(y_pred_rf_arr[:, 0]) + np.rint(y_pred_rf_arr[:, 1])
+    real_sum = np.rint(y_val_arr[:, 0]) + np.rint(y_val_arr[:, 1])
+    over2_correct_rf = np.sum((pred_sum_rf >= 2) == (real_sum >= 2))
+    over2_list_rf.append(over2_correct_rf / len(y_val_arr))
+
+    pred_sum_lr = np.rint(y_pred_lr_arr[:, 0]) + np.rint(y_pred_lr_arr[:, 1])
+    over2_correct_lr = np.sum((pred_sum_lr >= 2) == (real_sum >= 2))
+    over2_list_lr.append(over2_correct_lr / len(y_val_arr))
+
+    # Após nested CV, treinar modelos finais no treino completo (x_train_all) com os melhores hiperparâmetros
+    # Para simplicidade, fazemos GridSearch final sobre x_train_all para obter estimadores finais
+    best_rf_0, _ = grid_search(RandomForestRegressor(random_state=100), param_grid_rf, x_train_all, y_train_all[:, 0])
+    best_rf_1, _ = grid_search(RandomForestRegressor(random_state=100), param_grid_rf, x_train_all, y_train_all[:, 1])
+    best_lr_0, _ = grid_search(LinearRegression(), param_grid_lr, x_train_all, y_train_all[:, 0])
+    best_lr_1, _ = grid_search(LinearRegression(), param_grid_lr, x_train_all, y_train_all[:, 1])
+    # apenas RF e LR: já obtidos acima
+    # XGBoost final (se disponível)
+    if xgb_available:
+        best_xgb_0, _ = grid_search(XGBRegressor(objective='reg:squarederror', random_state=100), param_grid_xgb, x_train_all, y_train_all[:, 0])
+        best_xgb_1, _ = grid_search(XGBRegressor(objective='reg:squarederror', random_state=100), param_grid_xgb, x_train_all, y_train_all[:, 1])
+
+    # Resultados finais do K-Fold
+    resultados_finais = []
+
+    resultados_finais.append("Resultados Finais após K-Fold:")
+    resultados_finais.append(f'Random Forest - MSE médio (Gols Sofridos): {np.mean(mse_list_rf[0]):.5f}')
+    resultados_finais.append(f'Random Forest - MSE médio (Gols Feitos): {np.mean(mse_list_rf[1]):.5f}')
+    resultados_finais.append(f'Random Forest - R^2 médio (Gols Sofridos): {np.mean(r2_list_rf[0]):.5f}')
+    resultados_finais.append(f'Random Forest - R^2 médio (Gols Feitos): {np.mean(r2_list_rf[1]):.5f}')
+    resultados_finais.append(f'Random Forest - Média de acertos: {np.mean([a[0] for a in acertos_list_rf]) / len(y_val) * 100:.2f}%')
+    resultados_finais.append(f'Random Forest - Média de acertos de placar exato: {np.mean([a[1] for a in acertos_list_rf]) / len(y_val) * 100:.2f}%')
+
+    resultados_finais.append(f'Regressão Linear - MSE médio (Gols Sofridos): {np.mean(mse_list_lr[0]):.5f}')
+    resultados_finais.append(f'Regressão Linear - MSE médio (Gols Feitos): {np.mean(mse_list_lr[1]):.5f}')
+    resultados_finais.append(f'Regressão Linear - R^2 médio (Gols Sofridos): {np.mean(r2_list_lr[0]):.5f}')
+    resultados_finais.append(f'Regressão Linear - R^2 médio (Gols Feitos): {np.mean(r2_list_lr[1]):.5f}')
+    resultados_finais.append(f'Regressão Linear - Média de acertos: {np.mean([a[0] for a in acertos_list_lr]) / len(y_val) * 100:.2f}%')
+    resultados_finais.append(f'Regressão Linear - Média de acertos de placar exato: {np.mean([a[1] for a in acertos_list_lr]) / len(y_val) * 100:.2f}%')
+
+    # Resumo XGBoost (se disponível)
+    if xgb_available:
+        resultados_finais.append(f'XGBoost - MSE médio (Gols Sofridos): {np.mean(mse_list_xgb[0]):.5f}')
+        resultados_finais.append(f'XGBoost - MSE médio (Gols Feitos): {np.mean(mse_list_xgb[1]):.5f}')
+        resultados_finais.append(f'XGBoost - R^2 médio (Gols Sofridos): {np.mean(r2_list_xgb[0]):.5f}')
+        resultados_finais.append(f'XGBoost - R^2 médio (Gols Feitos): {np.mean(r2_list_xgb[1]):.5f}')
+        resultados_finais.append(f'XGBoost - Média de acertos: {np.mean([a[0] for a in acertos_list_xgb]) / len(y_val) * 100:.2f}%')
+        resultados_finais.append(f'XGBoost - Média de acertos de placar exato: {np.mean([a[1] for a in acertos_list_xgb]) / len(y_val) * 100:.2f}%')
+
+    # Removed other model summaries (keeping only RF and LR)
+
+    # Média de acertos para 'total de gols >=2' nos folds
+    resultados_finais.append(f'Random Forest - % acertos total>=2 (KFold): {np.mean(over2_list_rf) * 100:.2f}%')
+    resultados_finais.append(f'Regressão Linear - % acertos total>=2 (KFold): {np.mean(over2_list_lr) * 100:.2f}%')
+
+    if xgb_available:
+        resultados_finais.append(f'XGBoost - % acertos total>=2 (KFold): {np.mean(over2_list_xgb) * 100:.2f}%')
+
+    # removed CatBoost final summary
+
+    # Utilizando os melhores modelos para realizar as previsões no conjunto de teste e calcular as métricas
+
+    resultados_finais.append("\nResultados finais no conjunto de teste utilizando os parametros encontrados na busca em grid:")
+    # Previsões no conjunto de teste final
+    y_pred_rf = np.column_stack((best_rf_0.predict(x_test), best_rf_1.predict(x_test)))
+    y_pred_lr = np.column_stack((best_lr_0.predict(x_test), best_lr_1.predict(x_test)))
+    if xgb_available:
+        y_pred_xgb = np.column_stack((best_xgb_0.predict(x_test), best_xgb_1.predict(x_test)))
+    # apenas RF e LR: previsões no conjunto de teste final
+
+    # Clipping
+    y_pred_rf = np.clip(y_pred_rf, 0, None)
+    y_pred_lr = np.clip(y_pred_lr, 0, None)
+    # Clipping already done for RF and LR
+
+    # Avaliação dos modelos no teste final
+    acertos_rf, acertos_placar_exato_rf = calcular_acertos(y_pred_rf, y_test, rodadas_test, "Teste Random Forest")
+    mse_rf_0 = mean_squared_error(y_test[:, 0], y_pred_rf[:, 0])
+    mse_rf_1 = mean_squared_error(y_test[:, 1], y_pred_rf[:, 1])
+    r2_rf_0 = r2_score(y_test[:, 0], y_pred_rf[:, 0])
+    r2_rf_1 = r2_score(y_test[:, 1], y_pred_rf[:, 1])
+
+    resultados_finais.append(f'Random Forest - MSE (Gols Sofridos): {mse_rf_0:.5f}')
+    resultados_finais.append(f'Random Forest - MSE (Gols Feitos): {mse_rf_1:.5f}')
+    resultados_finais.append(f'Random Forest - R^2 (Gols Sofridos): {r2_rf_0:.5f}')
+    resultados_finais.append(f'Random Forest - R^2 (Gols Feitos): {r2_rf_1:.5f}')
+    resultados_finais.append(f'Random Forest - Acertos: {acertos_rf / len(y_test) * 100:.2f}%')
+    resultados_finais.append(f'Random Forest - Acertos de placar exato: {acertos_placar_exato_rf / len(y_test) * 100:.2f}%')
+
+    acertos_lr, acertos_placar_exato_lr = calcular_acertos(y_pred_lr, y_test, rodadas_test, "Teste Regressão Linear")
+    mse_lr_0 = mean_squared_error(y_test[:, 0], y_pred_lr[:, 0])
+    mse_lr_1 = mean_squared_error(y_test[:, 1], y_pred_lr[:, 1])
+    r2_lr_0 = r2_score(y_test[:, 0], y_pred_lr[:, 0])
+    r2_lr_1 = r2_score(y_test[:, 1], y_pred_lr[:, 1])
+
+    resultados_finais.append(f'Regressão Linear - MSE (Gols Sofridos): {mse_lr_0:.5f}')
+    resultados_finais.append(f'Regressão Linear - MSE (Gols Feitos): {mse_lr_1:.5f}')
+    resultados_finais.append(f'Regressão Linear - R^2 (Gols Sofridos): {r2_lr_0:.5f}')
+    resultados_finais.append(f'Regressão Linear - R^2 (Gols Feitos): {r2_lr_1:.5f}')
+    resultados_finais.append(f'Regressão Linear - Acertos: {acertos_lr / len(y_test) * 100:.2f}%')
+    resultados_finais.append(f'Regressão Linear - Acertos de placar exato: {acertos_placar_exato_lr / len(y_test) * 100:.2f}%')
+
+    # Avaliação XGBoost no teste final (se disponível)
+    if xgb_available:
+        # clipping
+        y_pred_xgb = np.clip(y_pred_xgb, 0, None)
+        acertos_xgb, acertos_placar_exato_xgb = calcular_acertos(y_pred_xgb, y_test, rodadas_test, "Teste XGBoost")
+        mse_xgb_0 = mean_squared_error(y_test[:, 0], y_pred_xgb[:, 0])
+        mse_xgb_1 = mean_squared_error(y_test[:, 1], y_pred_xgb[:, 1])
+        r2_xgb_0 = r2_score(y_test[:, 0], y_pred_xgb[:, 0])
+        r2_xgb_1 = r2_score(y_test[:, 1], y_pred_xgb[:, 1])
+
+        resultados_finais.append(f'XGBoost - MSE (Gols Sofridos): {mse_xgb_0:.5f}')
+        resultados_finais.append(f'XGBoost - MSE (Gols Feitos): {mse_xgb_1:.5f}')
+        resultados_finais.append(f'XGBoost - R^2 (Gols Sofridos): {r2_xgb_0:.5f}')
+        resultados_finais.append(f'XGBoost - R^2 (Gols Feitos): {r2_xgb_1:.5f}')
+        resultados_finais.append(f'XGBoost - Acertos: {acertos_xgb / len(y_test) * 100:.2f}%')
+        resultados_finais.append(f'XGBoost - Acertos de placar exato: {acertos_placar_exato_xgb / len(y_test) * 100:.2f}%')
+
+    # outros modelos removidos; mantemos apenas RF e LR no teste final
+
+    # Verificação extra no conjunto de teste final: total de gols previsto >=2
+    # Garantir que usamos arrays numpy numéricos antes de aplicar np.rint
+    y_test_arr = np.asarray(y_test, dtype=float)
+    y_pred_rf_arr = np.asarray(y_pred_rf, dtype=float)
+    y_pred_lr_arr = np.asarray(y_pred_lr, dtype=float)
+
+    real_sum_test = np.rint(y_test_arr[:, 0]) + np.rint(y_test_arr[:, 1])
+    pred_sum_rf_test = np.rint(y_pred_rf_arr[:, 0]) + np.rint(y_pred_rf_arr[:, 1])
+    pred_sum_lr_test = np.rint(y_pred_lr_arr[:, 0]) + np.rint(y_pred_lr_arr[:, 1])
+    pred_sum_rf_test = np.rint(y_pred_rf_arr[:, 0]) + np.rint(y_pred_rf_arr[:, 1])
+    pred_sum_lr_test = np.rint(y_pred_lr_arr[:, 0]) + np.rint(y_pred_lr_arr[:, 1])
+
+    over2_test_rf = np.sum((pred_sum_rf_test >= 2) == (real_sum_test >= 2)) / len(y_test)
+    over2_test_lr = np.sum((pred_sum_lr_test >= 2) == (real_sum_test >= 2)) / len(y_test)
+
+    resultados_finais.append(f'Random Forest - % acertos total>=2 (Teste): {over2_test_rf * 100:.2f}%')
+    resultados_finais.append(f'Regressão Linear - % acertos total>=2 (Teste): {over2_test_lr * 100:.2f}%')
+    # outros modelos removidos do sumário de over2 no teste final
+
+    if xgb_available:
+        pred_sum_xgb_test = np.rint(np.asarray(y_pred_xgb, dtype=float)[:, 0]) + np.rint(np.asarray(y_pred_xgb, dtype=float)[:, 1])
+        over2_test_xgb = np.sum((pred_sum_xgb_test >= 2) == (real_sum_test >= 2)) / len(y_test)
+        resultados_finais.append(f'XGBoost - % acertos total>=2 (Teste): {over2_test_xgb * 100:.2f}%')
+
+    # Se existirem primeiros N jogos preservados, prever e calcular over2 para eles também
+    if 'x_first' in locals() and x_first.shape[0] > 0:
+            y_pred_first_rf = np.column_stack((best_rf_0.predict(x_first), best_rf_1.predict(x_first)))
+            y_pred_first_lr = np.column_stack((best_lr_0.predict(x_first), best_lr_1.predict(x_first)))
+            # XGBoost para os primeiros N (se disponível)
+            if xgb_available:
+                y_pred_first_xgb = np.column_stack((best_xgb_0.predict(x_first), best_xgb_1.predict(x_first)))
+
+            # clipping
+            y_pred_first_rf = np.clip(y_pred_first_rf, 0, None)
+            y_pred_first_lr = np.clip(y_pred_first_lr, 0, None)
+            if xgb_available:
+                y_pred_first_xgb = np.clip(y_pred_first_xgb, 0, None)
+
+            # Garantir arrays numpy numéricos para os primeiros N jogos
+            y_first_arr = np.asarray(y_first, dtype=float)
+            y_pred_first_rf_arr = np.asarray(y_pred_first_rf, dtype=float)
+            y_pred_first_lr_arr = np.asarray(y_pred_first_lr, dtype=float)
+            if xgb_available:
+                y_pred_first_xgb_arr = np.asarray(y_pred_first_xgb, dtype=float)
+
+            real_sum_first = np.rint(y_first_arr[:, 0]) + np.rint(y_first_arr[:, 1])
+            over2_first_rf = np.sum((np.rint(y_pred_first_rf_arr[:, 0]) + np.rint(y_pred_first_rf_arr[:, 1]) >= 2) == (real_sum_first >= 2))
+            over2_first_lr = np.sum((np.rint(y_pred_first_lr_arr[:, 0]) + np.rint(y_pred_first_lr_arr[:, 1]) >= 2) == (real_sum_first >= 2))
+            if xgb_available:
+                over2_first_xgb = np.sum((np.rint(y_pred_first_xgb_arr[:, 0]) + np.rint(y_pred_first_xgb_arr[:, 1]) >= 2) == (real_sum_first >= 2))
+
+            resultados_finais.append(f'Random Forest - acertos total>=2 (Primeiros {len(y_first)}): {over2_first_rf}/{len(y_first)}')
+            resultados_finais.append(f'Regressão Linear - acertos total>=2 (Primeiros {len(y_first)}): {over2_first_lr}/{len(y_first)}')
+            if xgb_available:
+                resultados_finais.append(f'XGBoost - acertos total>=2 (Primeiros {len(y_first)}): {over2_first_xgb}/{len(y_first)}')
+
+            # Imprimir detalhes por rodada para os primeiros N jogos: Real, RF, LR e flags de acerto
+            rows_first = []
+            for i in range(len(y_first_arr)):
+                real_sofr = int(np.rint(y_first_arr[i, 0]))
+                real_feit = int(np.rint(y_first_arr[i, 1]))
+                rf_sofr = int(np.rint(y_pred_first_rf_arr[i, 0]))
+                rf_feit = int(np.rint(y_pred_first_rf_arr[i, 1]))
+                lr_sofr = int(np.rint(y_pred_first_lr_arr[i, 0]))
+                lr_feit = int(np.rint(y_pred_first_lr_arr[i, 1]))
+
+                # over2
+                real_over2 = (real_feit + real_sofr) >= 2
+                rf_over2 = (rf_feit + rf_sofr) >= 2
+                lr_over2 = (lr_feit + lr_sofr) >= 2
+
+                # outcome
+                def outcome(feitos, sofridos):
+                    if feitos == sofridos:
+                        return 'Empate'
+                    return 'Vitória do flamengo' if feitos > sofridos else 'Vitória do adversário'
+
+                real_res = outcome(real_feit, real_sofr)
+                rf_res = outcome(rf_feit, rf_sofr)
+                lr_res = outcome(lr_feit, lr_sofr)
+                xgb_sofr = int(np.rint(y_pred_first_xgb_arr[i, 0])) if xgb_available else None
+                xgb_feit = int(np.rint(y_pred_first_xgb_arr[i, 1])) if xgb_available else None
+                xgb_over2 = (xgb_feit + xgb_sofr) >= 2 if xgb_available else None
+                xgb_res = outcome(xgb_feit, xgb_sofr) if xgb_available else None
+
+                rows_first.append({
+                    'Rodada': rodadas_first[i] if 'rodadas_first' in locals() and len(rodadas_first) > i else i,
+                    'Real': f'{real_feit} x {real_sofr}',
+                    'Real_total': real_feit + real_sofr,
+                    'Real_over2': real_over2,
+                    'RF': f'{rf_feit} x {rf_sofr}',
+                    'RF_total': rf_feit + rf_sofr,
+                    'RF_over2_ok': rf_over2 == real_over2,
+                    'LR': f'{lr_feit} x {lr_sofr}',
+                    'LR_total': lr_feit + lr_sofr,
+                    'LR_over2_ok': lr_over2 == real_over2,
+                    'RF_result_ok': rf_res == real_res,
+                    'LR_result_ok': lr_res == real_res,
+                    'RF_exact_ok': (rf_feit == real_feit and rf_sofr == real_sofr),
+                    'LR_exact_ok': (lr_feit == real_feit and lr_sofr == real_sofr)
+                })
+
+                # adicionar colunas XGBoost se disponível
+                if xgb_available:
+                    rows_first[-1].update({
+                        'XGB': f'{xgb_feit} x {xgb_sofr}',
+                        'XGB_total': xgb_feit + xgb_sofr,
+                        'XGB_over2_ok': xgb_over2 == real_over2,
+                        'XGB_result_ok': xgb_res == real_res,
+                        'XGB_exact_ok': (xgb_feit == real_feit and xgb_sofr == real_sofr)
+                    })
+
+            print(f"\nDetalhes por rodada (primeiros {len(rows_first)} jogos):")
+            try:
+                print(pd.DataFrame(rows_first).to_string(index=False))
+            except Exception:
+                for r in rows_first:
+                    print(r)
+            # Além da tabela, imprimir linha detalhada por rodada no formato pedido
+            try:
+                for i in range(len(y_first_arr)):
+                    rodada_val = rodadas_first[i] if 'rodadas_first' in locals() and len(rodadas_first) > i else i
+                    raw_rf = y_pred_first_rf_arr[i]
+                    round_rf = np.rint(raw_rf).astype(int)
+                    raw_lr = y_pred_first_lr_arr[i]
+                    round_lr = np.rint(raw_lr).astype(int)
+                    real = y_first_arr[i].astype(int)
+
+                    # recomputar outcomes
+                    def outcome_arr(arr):
+                        feitos = int(np.rint(arr[1]))
+                        sofridos = int(np.rint(arr[0]))
+                        if feitos == sofridos:
+                            return 'Empate'
+                        return 'Vitória do flamengo' if feitos > sofridos else 'Vitória do adversário'
+
+                    rf_out = outcome_arr(raw_rf)
+                    lr_out = outcome_arr(raw_lr)
+                    real_out = outcome_arr(real)
+
+                    # totals and >=2 flags
+                    real_total = int(np.rint(real[0]) + np.rint(real[1]))
+                    rf_total = int(np.rint(raw_rf[0]) + np.rint(raw_rf[1]))
+                    lr_total = int(np.rint(raw_lr[0]) + np.rint(raw_lr[1]))
+                    real_over2_flag = real_total >= 2
+                    rf_over2_flag = rf_total >= 2
+                    lr_over2_flag = lr_total >= 2
+
+                    print(f"{rodada_val}, RF Previsão (bruta): {np.array2string(raw_rf, precision=4, separator=' ')} | arredondada: {np.array2string(round_rf, separator=' ')} , Total RF: {rf_total} (>=2: {rf_over2_flag}) , Resultado real: {np.array2string(real, separator=' ')} , Total real: {real_total} (>=2: {real_over2_flag}) , RF Previsão: {rf_out}, Real: {real_out}")
+                    print(f"{rodada_val}, LR Previsão (bruta): {np.array2string(raw_lr, precision=4, separator=' ')} | arredondada: {np.array2string(round_lr, separator=' ')} , Total LR: {lr_total} (>=2: {lr_over2_flag}) , Resultado real: {np.array2string(real, separator=' ')} , Total real: {real_total} (>=2: {real_over2_flag}) , LR Previsão: {lr_out}, Real: {real_out}")
+                    # XGBoost prints (se disponível)
+                    if xgb_available:
+                        raw_xgb = y_pred_first_xgb_arr[i]
+                        round_xgb = np.rint(raw_xgb).astype(int)
+                        xgb_total = int(np.rint(raw_xgb[0]) + np.rint(raw_xgb[1]))
+                        xgb_over2_flag = xgb_total >= 2
+                        xgb_out = outcome_arr(raw_xgb)
+                        print(f"{rodada_val}, XGB Previsão (bruta): {np.array2string(raw_xgb, precision=4, separator=' ')} | arredondada: {np.array2string(round_xgb, separator=' ')} , Total XGB: {xgb_total} (>=2: {xgb_over2_flag}) , Resultado real: {np.array2string(real, separator=' ')} , Total real: {real_total} (>=2: {real_over2_flag}) , XGB Previsão: {xgb_out}, Real: {real_out}")
+            except Exception as e:
+                import traceback
+                print('Erro ao imprimir linhas detalhadas dos primeiros N jogos:', e)
+                traceback.print_exc()
+            
+
+
+    # Imprimir o resumo final como o ÚLTIMO bloco no terminal
+    # Função auxiliar: converte previsão/real em texto de resultado
+    def outcome_from_arr(arr):
+        feitos = int(np.rint(arr[1]))
+        sofridos = int(np.rint(arr[0]))
+        if feitos == sofridos:
+            return 'Empate'
+        return 'Vitória do flamengo' if feitos > sofridos else 'Vitória do adversário'
+
+    def outcome_counts_correct(y_pred_arr, y_true_arr):
+        # recebe arrays numpy numéricos Nx2
+        keys = ['Empate', 'Vitória do flamengo', 'Vitória do adversário']
+        correct = {k: 0 for k in keys}
+        totals = {k: 0 for k in keys}
+        n = len(y_true_arr)
+        for i in range(n):
+            actual = outcome_from_arr(y_true_arr[i])
+            pred = outcome_from_arr(y_pred_arr[i])
+            totals[actual] += 1
+            if pred == actual:
+                correct[actual] += 1
+        return correct, totals
+
+    # Contagem de acertos por tipo no conjunto de teste
+    try:
+        # garantir arrays numpy numéricos
+        y_test_arr = np.asarray(y_test, dtype=float)
+        y_pred_rf_arr = np.asarray(y_pred_rf, dtype=float)
+        y_pred_lr_arr = np.asarray(y_pred_lr, dtype=float)
+
+        rf_correct_test, rf_totals_test = outcome_counts_correct(y_pred_rf_arr, y_test_arr)
+        lr_correct_test, lr_totals_test = outcome_counts_correct(y_pred_lr_arr, y_test_arr)
+
+        resultados_finais.append('\nAcertos por tipo (conjunto de teste):')
+        resultados_finais.append(f"Random Forest - Empates: {rf_correct_test['Empate']}/{rf_totals_test['Empate']}, Vitórias do flamengo: {rf_correct_test['Vitória do flamengo']}/{rf_totals_test['Vitória do flamengo']}, Vitórias do adversário: {rf_correct_test['Vitória do adversário']}/{rf_totals_test['Vitória do adversário']}")
+        resultados_finais.append(f"Regressão Linear - Empates: {lr_correct_test['Empate']}/{lr_totals_test['Empate']}, Vitórias do flamengo: {lr_correct_test['Vitória do flamengo']}/{lr_totals_test['Vitória do flamengo']}, Vitórias do adversário: {lr_correct_test['Vitória do adversário']}/{lr_totals_test['Vitória do adversário']}")
+    except Exception:
+        # se algo falhar (por exemplo arrays vazios), ignorar sem quebrar
+        pass
+
+    # Se houver primeiros N jogos, fazer a mesma contagem para eles
+    if 'x_first' in locals() and x_first.shape[0] > 0:
+        try:
+            y_first_arr = np.asarray(y_first, dtype=float)
+            y_pred_first_rf_arr = np.asarray(y_pred_first_rf, dtype=float)
+            y_pred_first_lr_arr = np.asarray(y_pred_first_lr, dtype=float)
+
+            rf_correct_first, rf_totals_first = outcome_counts_correct(y_pred_first_rf_arr, y_first_arr)
+            lr_correct_first, lr_totals_first = outcome_counts_correct(y_pred_first_lr_arr, y_first_arr)
+
+            resultados_finais.append('\nAcertos por tipo (primeiros jogos preservados):')
+            resultados_finais.append(f"Random Forest - Empates: {rf_correct_first['Empate']}/{rf_totals_first['Empate']}, Vitórias do flamengo: {rf_correct_first['Vitória do flamengo']}/{rf_totals_first['Vitória do flamengo']}, Vitórias do adversário: {rf_correct_first['Vitória do adversário']}/{rf_totals_first['Vitória do adversário']}")
+            resultados_finais.append(f"Regressão Linear - Empates: {lr_correct_first['Empate']}/{lr_totals_first['Empate']}, Vitórias do flamengo: {lr_correct_first['Vitória do flamengo']}/{lr_totals_first['Vitória do flamengo']}, Vitórias do adversário: {lr_correct_first['Vitória do adversário']}/{lr_totals_first['Vitória do adversário']}")
+        except Exception:
+            pass
+
+    print('\n===== Resumo final (última saída) =====')
+    print('\n'.join(resultados_finais))
+
+    # Escrevendo a saída em um arquivo Excel
+    #output_df = pd.DataFrame(saida_teste)
+    #output_df.to_excel(f'c:/Users/JH/Programs/ML_proj/saida_teste_fold_{fold_num}.xlsx', index=False)
+main(1, predict_first_n=5)
